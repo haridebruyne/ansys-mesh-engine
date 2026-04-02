@@ -1,0 +1,3 @@
+Geometry Type,Flow Velocity,Max Lift Coefficient,Stall Angle,Zero-Lift Drag,Recommended Turbulence Model,Target y+ Value,Validation Source
+NACA 2412,44 m/s (Re 3.0e6),1.60,16,0.0058,Spalart-Allmaras,1.0,Abbott & Von Doenhoff
+NACA 2412,88 m/s (Re 6.0e6),1.67,16,0.0053,Spalart-Allmaras,1.0,Abbott & Von Doenhoff

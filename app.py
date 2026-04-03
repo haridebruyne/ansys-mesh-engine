@@ -178,7 +178,7 @@ REGIME_LABEL = {
 }
 
 # ── 4. Page Layout ──────────────────────────────────────────────────────
-st.set_page_config(page_title="Ansys CFD Meshing Engine", page_icon="", layout="wide")
+st.set_page_config(page_title="Ansys CFD Meshing Engine", page_icon="✈️", layout="wide")
 st.title("Ansys CFD Meshing Engine")
 st.write("Airfoil V&V · Mesh Blueprint · **Mach-aware Domain Sizing**")
 st.divider()
@@ -197,6 +197,16 @@ with st.sidebar:
 | Viscous sublayer | <= 5 | k-w SST, S-A |
 | AVOID buffer | 5-30 | neither |
 | Log-law | 30-60 | k-e, RSM |
+""")
+    st.markdown("---")
+    st.markdown("##### Domain multipliers by Mach")
+    st.markdown("""
+| Regime | Up | Down | Height |
+|---|---|---|---|
+| Subsonic | 15c | 20c | 20c |
+| Transonic | 30c | 40c | 30c |
+| High trans | 40c | 50c | 35c |
+| Supersonic | 10c | 60c | 40c |
 """)
 
 # ── Section 1: Validation Targets ───────────────────────────────────────
@@ -240,6 +250,11 @@ m1.metric("Mach number", f"{mach_val:.4f}")
 m2.metric("Flow regime", REGIME_LABEL[regime])
 m3.metric("Speed of sound (sea level)", f"{SPEED_OF_SOUND} m/s")
 
+if regime == "supersonic":
+    st.error("Supersonic flow detected. Use Density-Based solver + Roe-FDS flux. Enable energy equation. Ideal Gas density.")
+elif regime in ("transonic", "high_transonic"):
+    st.warning("Transonic flow. Switch to Density-Based solver. Enable energy equation + compressibility corrections.")
+
 st.divider()
 
 # ── Section 3: Domain Sizing ─────────────────────────────────────────────
@@ -250,7 +265,7 @@ domain_strategy = st.radio("Domain Topology",
                            ["Standard C-Grid (Industry Standard)", "Square Grid (Academic / Golmirzaee 2024)"], 
                            horizontal=True)
 
-# Variables to hold domain bounds for the TUI output later
+# Variable to hold domain bounds for the final TUI output block
 tui_domain_text = ""
 
 if "C-Grid" in domain_strategy:
@@ -264,13 +279,24 @@ if "C-Grid" in domain_strategy:
     de.metric("Blockage Ratio", f"{domain['blockage_pct']:.3f}%")
     
     with st.expander("Domain details, boundary conditions & physics reasoning", expanded=True):
-        st.info(domain['reason'])
-        st.write(f"**Mesh topology:** `{domain['mesh_type']}`")
-        
+        exp_l, exp_r = st.columns(2)
+        with exp_l:
+            st.markdown("##### Domain box")
+            st.write(f"**Width:** `{domain['total_width_m']:.3f} m`  "
+                     f"({domain['upstream_c']:.0f}c upstream + 1c airfoil + {domain['downstream_c']:.0f}c downstream)")
+            st.write(f"**Height:** `{domain['total_height_m']:.3f} m`  ({domain['height_c']:.0f}c)")
+            st.write(f"**Airfoil leading edge at:** x = `{domain['upstream_m']:.3f} m` from inlet")
+            st.write(f"**Mesh topology:** `{domain['mesh_type']}`")
+        with exp_r:
+            st.markdown("##### Why this domain size?")
+            st.info(domain['reason'])
+            
+    # Set the TUI script text for C-Grid
     tui_domain_text = (f"; Upstream extent    : {domain['upstream_m']:.3f} m  ({domain['upstream_c']:.0f} x chord)\n"
                        f"; Downstream extent  : {domain['downstream_m']:.3f} m  ({domain['downstream_c']:.0f} x chord)\n"
                        f"; Domain height      : {domain['height_m']:.3f} m  ({domain['height_c']:.0f} x chord)\n"
-                       f"; Total width        : {domain['total_width_m']:.3f} m")
+                       f"; Total width        : {domain['total_width_m']:.3f} m\n"
+                       f"; Airfoil LE at x    : {domain['upstream_m']:.3f} m from inlet")
 
 else:
     bc_type = st.selectbox("Boundary Condition Type", ["Standard Boundaries (Slip/Symmetry)", "Point Vortex BC (PVBC)"])
@@ -294,6 +320,7 @@ else:
             st.write("If using Standard Boundaries, the digital walls induce an artificial pressure drag. Calculate the true infinite-domain drag using:")
             st.latex(r"C_{d,\infty} \approx C_{d} - 0.0205 \frac{C_{l}^{2}}{A}")
             
+    # Set the TUI script text for Square Grid
     tui_domain_text = (f"; Square Parameter A : {sq_domain['A_m']:.3f} m  ({sq_domain['A_c']:.0f} x chord)\n"
                        f"; Total Size         : {sq_domain['total_size_m']:.3f} m x {sq_domain['total_size_m']:.3f} m\n"
                        f"; Airfoil LE at      : (0, 0) relative to domain center")
@@ -346,7 +373,7 @@ if generate:
 
     st.success(f"Reynolds: {calc_re:.2e}  |  Mach: {mach_val:.4f}  |  Regime: {REGIME_LABEL[regime]}")
 
-    col_mesh, col_solver = st.columns(2)
+    col_mesh, col_solver, col_dom = st.columns(3)
 
     with col_mesh:
         st.markdown("#### Meshing module (Ansys Meshing)")
@@ -354,15 +381,86 @@ if generate:
         st.write(f"**Growth rate:** `{growth_rate}`")
         st.write(f"**Total inflation layers:** `{calc_layers}`")
         st.write(f"**BL thickness delta:** `{calc_delta:.3f} mm`")
+        st.write(f"**Inflation algorithm:** `Pre`")
+        st.write(f"**Transition ratio:** `0.272`")
+        st.write(f"**Max face size (far-field):** `{c_input * 0.5:.3f} m`")
+        st.write(f"**Min face size (TE):** `{c_input * 0.001:.5f} m`")
 
     with col_solver:
         st.markdown("#### Fluent solver settings")
         st.write(f"**Turbulence model:** `{rec['primary']}`")
+        st.write(f"**Wall treatment:** `{rec['wall_treatment']}`")
         st.write(f"**Target y+:** `{target_yplus}`")
         if regime == "subsonic":
             st.write("**Solver:** `Pressure-Based`")
+            st.write("**Pressure discretisation:** `Second Order`")
+            st.write("**Momentum:** `Second Order Upwind`")
         else:
             st.write("**Solver:** `Density-Based`")
+            st.write("**Flux type:** `Roe-FDS`")
+            st.write("**Energy equation:** `ON`")
+        if target_data is not None:
+            st.write(f"**Expected Cl_max:** `{target_data['Max Lift Coefficient']}`")
+            st.write(f"**Expected stall angle:** `{target_data['Stall Angle']} deg`")
+
+    with col_dom:
+        st.markdown("#### Domain summary")
+        if "C-Grid" in domain_strategy:
+            st.write(f"**Upstream:** `{domain['upstream_m']:.3f} m`")
+            st.write(f"**Downstream:** `{domain['downstream_m']:.3f} m`")
+            st.write(f"**Total width:** `{domain['total_width_m']:.3f} m`")
+            st.write(f"**Blockage:** `{domain['blockage_pct']:.3f}%`")
+        else:
+            st.write(f"**Parameter A:** `{sq_domain['A_m']:.3f} m`")
+            st.write(f"**Total Size:** `{sq_domain['total_size_m']:.3f}m x {sq_domain['total_size_m']:.3f}m`")
+            st.write(f"**Blockage:** `{sq_domain['blockage_pct']:.3f}%`")
+
+    st.divider()
+    st.markdown("#### Mesh quality checklist")
+    checks = []
+
+    if zone == "buffer":
+        checks.append(("FAIL", "y+ zone",
+                       f"BUFFER ZONE (y+ = {actual_yplus:.1f}). Max 20% error in Cf. "
+                       "Refine below y+=5 or coarsen above y+=30."))
+    elif zone == "viscous_sublayer":
+        checks.append(("PASS", "y+ zone", f"Viscous sublayer resolved (y+ = {actual_yplus:.1f})."))
+    else:
+        checks.append(("PASS", "y+ zone", f"Log-law region (y+ = {actual_yplus:.1f})."))
+
+    checks.append(("PASS" if 1.1 <= growth_rate <= 1.2 else "WARN", "Growth rate",
+                   f"{growth_rate} — {'optimal' if 1.1 <= growth_rate <= 1.2 else 'outside 1.1-1.2 range'}."))
+
+    if calc_layers < 15:
+        checks.append(("WARN", "Layer count", f"{calc_layers} — low. May not cover full BL."))
+    elif calc_layers > 60:
+        checks.append(("WARN", "Layer count", f"{calc_layers} — very high. Check growth rate."))
+    else:
+        checks.append(("PASS", "Layer count", f"{calc_layers} layers — covers delta = {calc_delta:.2f} mm."))
+
+    if yplus_mode == "near_wall" and zone == "log_law":
+        checks.append(("WARN", "Model compatibility", "Near-wall model but y+ in log-law range."))
+    elif yplus_mode == "wall_function" and zone == "viscous_sublayer":
+        checks.append(("WARN", "Model compatibility", "Wall function but y+ in viscous sublayer — invalid."))
+    else:
+        checks.append(("PASS", "Model compatibility", f"{rec['primary']} consistent with y+ = {actual_yplus:.1f}."))
+
+    if regime in ("transonic", "high_transonic", "supersonic"):
+        checks.append(("WARN", "Compressibility",
+                        f"Mach {mach_val:.3f} — verify density-based solver, ideal gas, energy eq ON."))
+    else:
+        checks.append(("PASS", "Compressibility", f"Mach {mach_val:.4f} — incompressible assumption valid."))
+
+    if calc_re < 5e4:
+        checks.append(("WARN", "Reynolds", f"{calc_re:.2e} — consider laminar or transition model."))
+    elif calc_re > 1e7:
+        checks.append(("WARN", "Reynolds", f"{calc_re:.2e} — high Re, check mesh density."))
+    else:
+        checks.append(("PASS", "Reynolds", f"{calc_re:.2e} — RANS turbulence models applicable."))
+
+    icon_map = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
+    for status, label, msg in checks:
+        st.write(f"{icon_map[status]} **{label}:** {msg}")
 
     st.divider()
     st.markdown("#### Fluent TUI reference snippet")
@@ -381,9 +479,10 @@ if generate:
         f"; Velocity inlet\n"
         f"/define/boundary-conditions/velocity-inlet inlet yes no {v_input} no 0 no 0\n\n"
         f"; ── Ansys Meshing inflation inputs ─────────────────\n"
-        f"; First cell height  : {calc_dy:.5f} mm\n"
+        f"; First cell height  : {calc_dy:.5f} mm  = {calc_dy/1000:.7f} m\n"
         f"; Growth rate        : {growth_rate}\n"
-        f"; Total layers       : {calc_layers}\n\n"
+        f"; Total layers       : {calc_layers}\n"
+        f"; Target y+          : {target_yplus}\n\n"
         f"; ── Domain geometry (SpaceClaim / DesignModeler) ───\n"
         f"{tui_domain_text}\n",
         language="text"

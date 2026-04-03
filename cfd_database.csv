@@ -1,11 +1,9 @@
-Geometry Type,Flow Velocity,Max Lift Coefficient,Stall Angle,Zero-Lift Drag,Recommended Turbulence Model,Target y+ Value,Validation Source
-NACA 2412,44 m/s (Re 3.0e6),1.60,16,0.0058,Spalart-Allmaras,1.0,Abbott & Von Doenhoff
-NACA 2412,88 m/s (Re 6.0e6),1.67,16,0.0053,Spalart-Allmaras,1.0,Abbott & Von Doenhoff
-NACA 0012,34 m/s (Re 2.3e6),1.52,16,0.0060,k-ω SST,1.0,Abbott & Von Doenhoff
-NACA 0012,68 m/s (Re 4.6e6),1.58,16,0.0055,k-ω SST,1.0,Abbott & Von Doenhoff
-NACA 4412,44 m/s (Re 3.0e6),1.80,14,0.0065,k-ω SST,1.0,Abbott & Von Doenhoff
-NACA 4412,88 m/s (Re 6.0e6),1.85,14,0.0060,k-ω SST,1.0,Abbott & Von Doenhoff
-NACA 23012,44 m/s (Re 3.0e6),1.65,15,0.0060,k-ω SST,1.0,Abbott & Von Doenhoff
-NACA 23012,88 m/s (Re 6.0e6),1.72,15,0.0055,k-ω SST,1.0,Abbott & Von Doenhoff
-Flat Plate / Bluff Body,10 m/s (Re 1.7e5),N/A,N/A,N/A,RSM + SWF,30.0,Salim & Cheah (2009)
-Flat Plate / Bluff Body,20 m/s (Re 3.4e5),N/A,N/A,N/A,RSM + SWF,30.0,Salim & Cheah (2009)
+Geometry Type,Flow Velocity / Mach Number,Max Lift Coefficient,Stall Angle,Zero-Lift Drag,Validation Source
+NACA 2412,44 m/s (Re 3.0e6),1.60,16,0.0058,Abbott & Von Doenhoff (1949)
+NACA 2412,88 m/s (Re 6.0e6),1.67,16,0.0053,Abbott & Von Doenhoff (1949)
+NACA 0012,44 m/s (Re 3.0e6),1.50,16,0.0060,Abbott & Von Doenhoff (1949)
+NACA 0012,88 m/s (Re 6.0e6),1.55,16,0.0055,Abbott & Von Doenhoff (1949)
+NACA 4412,44 m/s (Re 3.0e6),1.67,14,0.0062,Abbott & Von Doenhoff (1949)
+NACA 4412,88 m/s (Re 6.0e6),1.67,14,0.0058,Abbott & Von Doenhoff (1949)
+NACA 23012,44 m/s (Re 3.0e6),1.70,15,0.0060,Abbott & Von Doenhoff (1949)
+NACA 23012,88 m/s (Re 6.0e6),1.75,16,0.0055,Abbott & Von Doenhoff (1949)

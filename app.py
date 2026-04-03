@@ -10,7 +10,7 @@ def load_data():
 try:
     df = load_data()
 except FileNotFoundError:
-    st.error("Error: 'cfd_database.csv' not found. Place it in the same folder.")
+    st.error("Error: 'cfd_database.csv' not found. Place it in the same folder as app.py.")
     st.stop()
 
 # ── 2. Physics Engines ──────────────────────────────────────────────────
@@ -198,16 +198,6 @@ with st.sidebar:
 | AVOID buffer | 5-30 | neither |
 | Log-law | 30-60 | k-e, RSM |
 """)
-    st.markdown("---")
-    st.markdown("##### Domain multipliers by Mach")
-    st.markdown("""
-| Regime | Up | Down | Height |
-|---|---|---|---|
-| Subsonic | 15c | 20c | 20c |
-| Transonic | 30c | 40c | 30c |
-| High trans | 40c | 50c | 35c |
-| Supersonic | 10c | 60c | 40c |
-""")
 
 # ── Section 1: Validation Targets ───────────────────────────────────────
 st.subheader("1. Aerodynamic validation targets")
@@ -215,8 +205,10 @@ airfoil_df  = df[df['Geometry Type'] == selected_airfoil] if selected_airfoil in
 target_data = None
 
 if not airfoil_df.empty:
+    # Explicitly using 'Flow Velocity / Mach Number' to match the CSV perfectly
     selected_flow = st.selectbox("Wind-tunnel test speed", airfoil_df['Flow Velocity / Mach Number'].unique())
     target_data   = airfoil_df[airfoil_df['Flow Velocity / Mach Number'] == selected_flow].iloc[0]
+    
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Cl_max", target_data['Max Lift Coefficient'])
     c2.metric("Stall angle", f"{target_data['Stall Angle']} deg")

@@ -87,7 +87,6 @@ def calculate_c_grid_domain(velocity, chord):
     mu_deg = mach_cone_half_angle_deg(mach)
 
     if regime == "subsonic":
-        # ── Incompressible: NACA/ESDU standard ──────────────────────
         upstream   = 15.0
         downstream = 20.0
         height     = 20.0
@@ -102,8 +101,6 @@ def calculate_c_grid_domain(velocity, chord):
         formula_detail = "Upstream=15c, Downstream=20c, Height=20c  (incompressible standard)"
 
     elif regime == "transonic":
-        # ── Compressible: Prandtl-Glauert scaling ───────────────────
-        # Incompressible base × (1/β), with caps to prevent runaway near M→0.8
         upstream   = min(15.0 / beta, 30.0)
         downstream = min(20.0 / beta, 50.0)
         height     = min(20.0 / beta, 40.0)
@@ -124,7 +121,6 @@ def calculate_c_grid_domain(velocity, chord):
         )
 
     elif regime == "high_transonic":
-        # ── Near-sonic: P-G singular, empirical (Jameson 2008) ──────
         upstream   = 50.0
         downstream = 60.0
         height     = 40.0
@@ -146,11 +142,8 @@ def calculate_c_grid_domain(velocity, chord):
         )
 
     else:
-        # ── Supersonic: Mach cone geometry ──────────────────────────
         mu_rad          = math.radians(mu_deg)
         downstream      = 60.0
-        # Height must contain the Mach wave spreading laterally
-        # over the full downstream length: H ≥ downstream_c × tan(µ)
         height_from_cone = downstream * math.tan(mu_rad)
         height           = max(40.0, height_from_cone)
         upstream         = 10.0
@@ -186,7 +179,7 @@ def calculate_c_grid_domain(velocity, chord):
         "reason": reason, "formula_detail": formula_detail,
     }
 
-# ── Square domain (unchanged) ──────────────────────────────────────────
+# ── Square domain ──────────────────────────────────────────────────────
 def calculate_square_domain(velocity, chord, bc_type):
     mach   = get_mach(velocity)
     regime = get_flow_regime(mach)
@@ -236,6 +229,21 @@ def calculate_square_domain(velocity, chord, bc_type):
         "mesh_type": "Square Grid (2A × 2A)",
     }
 
+# ── Airfoil max-thickness lookup (fraction of chord) ───────────────────
+# Used for blockage calculation instead of hardcoded 0.12.
+# NACA 4-digit: 4th+3rd digits = thickness %. Flat plate → near-zero, use 0.
+AIRFOIL_THICKNESS = {
+    "NACA 2412":               0.12,
+    "NACA 0012":               0.12,
+    "NACA 4412":               0.12,
+    "NACA 23012":              0.12,
+    "Flat Plate / Bluff Body": 0.01,   # negligible thickness; use 1% as conservative minimum
+}
+
+def get_airfoil_thickness(airfoil_name):
+    """Return max thickness as fraction of chord for blockage calculation."""
+    return AIRFOIL_THICKNESS.get(airfoil_name, 0.12)
+
 # ── Mesh blueprint ──────────────────────────────────────────────────────
 def calculate_mesh_blueprint(velocity, chord, target_yplus=1.0, growth_rate=1.15):
     density, viscosity = 1.225, 1.789e-5
@@ -245,20 +253,52 @@ def calculate_mesh_blueprint(velocity, chord, target_yplus=1.0, growth_rate=1.15
     u_tau         = math.sqrt(tau_w / density)
     first_cell_m  = (target_yplus * viscosity) / (density * u_tau)
     first_cell_mm = first_cell_m * 1000
-    delta         = (0.37 * chord) / math.pow(reynolds, 0.2)
-    delta_mm      = delta * 1000
-    try:
-        core_math    = 1 - ((delta * (1 - growth_rate)) / first_cell_m)
-        total_layers = math.ceil(math.log(core_math) / math.log(growth_rate)) if core_math > 0 else 30
-    except:
-        total_layers = 30
-    actual_yplus = (density * u_tau * first_cell_m) / viscosity
-    return reynolds, first_cell_mm, total_layers, delta_mm, actual_yplus
 
+    # ── BL thickness: Prandtl 1/5-power law ───────────────────────────
+    # δ/c = 0.37 · Re_c^(−1/5)  →  δ = 0.37 · c · Re^(−0.2)
+    delta         = 0.37 * chord * math.pow(reynolds, -0.2)
+    delta_mm      = delta * 1000
+
+    # ── Layer count via geometric series inversion ─────────────────────
+    # Total BL height = Δy · (r^N − 1) / (r − 1) = δ
+    # r^N = 1 + δ·(r−1)/Δy
+    # N   = log(1 + δ·(r−1)/Δy) / log(r)
+    # Equivalent form used: 1 − δ·(1−r)/Δy  ≡  1 + δ·(r−1)/Δy  ✓
+    geometric_argument = 1.0 + (delta * (growth_rate - 1.0)) / first_cell_m
+    if geometric_argument > 1.0:
+        total_layers = math.ceil(math.log(geometric_argument) / math.log(growth_rate))
+    else:
+        # geometric_argument ≤ 1 → log undefined or negative.
+        # This means δ·(r−1)/Δy ≥ 1, which is physically impossible for
+        # a well-posed grid (BL thicker than a single inflated cell at this growth rate).
+        # Surface the problem to the user rather than silently falling back.
+        total_layers = None   # sentinel — handled in UI below
+
+    actual_yplus = (density * u_tau * first_cell_m) / viscosity
+    return reynolds, first_cell_mm, total_layers, delta_mm, actual_yplus, u_tau
+
+# ── FIX 3: y+ zone — add outer-layer upper bound ──────────────────────
 def get_yplus_zone(yplus):
-    if yplus <= 5:    return "viscous_sublayer"
-    elif yplus <= 30: return "buffer"
-    else:             return "log_law"
+    """
+    Classify y+ into the standard three near-wall zones plus outer layer.
+
+    Zone boundaries (Wilcox 2006 / ANSYS Fluent Theory Guide):
+      y⁺ ≤ 5    → viscous sublayer  (resolved with near-wall model)
+      5 < y⁺ ≤ 30 → buffer layer   (AVOID — neither model valid here)
+      30 < y⁺ ≤ 300 → log-law region (wall functions valid)
+      y⁺ > 300  → outer layer      (wall functions break down)
+
+    Note: for fully-resolved LES/DNS the sublayer target is y⁺ ≈ 1.
+    The threshold of 5 is a practical upper limit for near-wall RANS.
+    """
+    if yplus <= 5:
+        return "viscous_sublayer"
+    elif yplus <= 30:
+        return "buffer"
+    elif yplus <= 300:
+        return "log_law"
+    else:
+        return "outer_layer"
 
 def get_model_rec(yplus_mode):
     if yplus_mode == "near_wall":
@@ -312,9 +352,10 @@ with st.sidebar:
     st.markdown("""
 | Zone | y+ | Model |
 |---|---|---|
-| Viscous sublayer | <= 5 | k-w SST, S-A |
-| AVOID buffer | 5-30 | neither |
-| Log-law | 30-60 | k-e, RSM |
+| Viscous sublayer | ≤ 5 | k-w SST, S-A |
+| AVOID buffer | 5–30 | neither |
+| Log-law | 30–300 | k-e, RSM |
+| Outer layer | > 300 | wall fn. invalid |
 """)
     st.markdown("---")
     st.markdown("##### C-grid domain formulas")
@@ -396,10 +437,15 @@ domain_strategy = st.radio("Domain topology",
                             "Square Grid (Academic / Compressible Golmirzaee 2024)"],
                            horizontal=True)
 
+# FIX 2: use actual airfoil thickness for blockage
+airfoil_t_frac = get_airfoil_thickness(selected_airfoil)
 tui_domain_text = ""
 
 if "C-Grid" in domain_strategy:
     domain = calculate_c_grid_domain(v_input, c_input)
+
+    # Override blockage with airfoil-specific thickness
+    domain["blockage_pct"] = (airfoil_t_frac * c_input / domain["height_m"]) * 100
 
     da, db, dc, dd, de = st.columns(5)
     da.metric("Upstream",    f"{domain['upstream_c']:.1f}c = {domain['upstream_m']:.2f} m")
@@ -417,6 +463,7 @@ if "C-Grid" in domain_strategy:
             st.write(f"**Height:** `{domain['total_height_m']:.3f} m`  ({domain['height_c']:.1f}c)")
             st.write(f"**Airfoil LE at:** x = `{domain['upstream_m']:.3f} m` from inlet")
             st.write(f"**Mesh topology:** `{domain['mesh_type']}`")
+            st.write(f"**Blockage t/c used:** `{airfoil_t_frac*100:.0f}%`  ({selected_airfoil})")
 
             st.markdown("##### Formula applied")
             st.code(domain['formula_detail'], language="text")
@@ -445,7 +492,7 @@ if "C-Grid" in domain_strategy:
                 st.write(f"**tan(µ):** `{math.tan(math.radians(domain['mu_deg'])):.4f}`")
             elif regime == "transonic":
                 st.write(f"**1/β (domain scale factor):** `{1/domain['beta']:.4f}×`")
-            
+
             st.markdown("##### Solver recommendation")
             if regime == "subsonic":
                 st.success("Solver: Pressure-Based | Density: Constant\nEnergy: OFF | Coupling: SIMPLE")
@@ -475,6 +522,9 @@ else:
     bc_type = st.selectbox("Boundary condition type",
                            ["Standard Boundaries (Slip/Symmetry)", "Point Vortex BC (PVBC)"])
     sq = calculate_square_domain(v_input, c_input, bc_type)
+
+    # FIX 2: airfoil-specific blockage for square domain
+    sq["blockage_pct"] = (airfoil_t_frac * c_input / sq["total_size_m"]) * 100
 
     da, db, dc, dd, de = st.columns(5)
     da.metric("Parameter A",  f"{sq['A_c']:.1f}c = {sq['A_m']:.2f} m")
@@ -549,8 +599,21 @@ with col_btn:
     generate = st.button("Generate full blueprint", type="primary", use_container_width=True)
 
 if generate:
-    calc_re, calc_dy, calc_layers, calc_delta, actual_yplus = calculate_mesh_blueprint(
-        v_input, c_input, target_yplus, growth_rate)
+    result = calculate_mesh_blueprint(v_input, c_input, target_yplus, growth_rate)
+    calc_re, calc_dy, calc_layers, calc_delta, actual_yplus, u_tau = result
+
+    # ── FIX 1: surface the degenerate layer-count case ─────────────────
+    if calc_layers is None:
+        st.error(
+            f"**Layer count calculation failed — degenerate grid geometry.**\n\n"
+            f"The boundary layer thickness δ = {calc_delta:.4f} mm is too large relative to "
+            f"the first cell height Δy = {calc_dy:.5f} mm at growth rate r = {growth_rate:.2f}. "
+            f"The geometric series argument (1 + δ·(r−1)/Δy) is ≤ 1, making log undefined.\n\n"
+            f"**Fix:** increase growth rate (try 1.2–1.3) or reduce chord / velocity "
+            f"to increase Reynolds number and shrink δ relative to Δy."
+        )
+        st.stop()
+
     zone = get_yplus_zone(actual_yplus)
 
     st.success(f"Re: {calc_re:.2e}  |  M: {mach_val:.4f}  |  β: {beta_val:.4f}  |  {REGIME_LABEL[regime]}")
@@ -562,6 +625,7 @@ if generate:
         st.write(f"**Growth rate:** `{growth_rate}`")
         st.write(f"**Total inflation layers:** `{calc_layers}`")
         st.write(f"**BL thickness δ:** `{calc_delta:.3f} mm`")
+        st.write(f"**u_τ (friction velocity):** `{u_tau:.4f} m/s`")
         st.write(f"**Inflation algorithm:** `Pre`")
         st.write(f"**Transition ratio:** `0.272`")
         st.write(f"**Max face size (far-field):** `{c_input*0.5:.3f} m`")
@@ -597,31 +661,52 @@ if generate:
     st.divider()
     st.markdown("#### Mesh quality checklist")
     checks = []
+
+    # ── FIX 3: full four-zone y+ check ────────────────────────────────
     if zone == "buffer":
-        checks.append(("FAIL","y+ zone", f"BUFFER ZONE (y+={actual_yplus:.1f}). Max 20% Cf error."))
+        checks.append(("FAIL","y+ zone",
+                        f"BUFFER ZONE (y+={actual_yplus:.1f}). Max 20% Cf error. "
+                        f"Adjust first cell height — target y+<5 or y+=30–300."))
+    elif zone == "outer_layer":
+        checks.append(("FAIL","y+ zone",
+                        f"OUTER LAYER (y+={actual_yplus:.1f} > 300). Wall functions are invalid here. "
+                        f"Reduce first cell height to bring y+ below 300."))
     elif zone == "viscous_sublayer":
-        checks.append(("PASS","y+ zone", f"Viscous sublayer resolved (y+={actual_yplus:.1f})."))
+        checks.append(("PASS","y+ zone", f"Viscous sublayer resolved (y+={actual_yplus:.1f} ≤ 5)."))
     else:
-        checks.append(("PASS","y+ zone", f"Log-law region (y+={actual_yplus:.1f})."))
+        checks.append(("PASS","y+ zone", f"Log-law region (y+={actual_yplus:.1f}, 30–300)."))
+
     checks.append(("PASS" if 1.1<=growth_rate<=1.2 else "WARN","Growth rate",
                    f"{growth_rate} — {'optimal (1.1-1.2)' if 1.1<=growth_rate<=1.2 else 'outside 1.1-1.2 range'}."))
-    if calc_layers < 15:   checks.append(("WARN","Layer count",f"{calc_layers} — low. May not cover full BL."))
-    elif calc_layers > 60: checks.append(("WARN","Layer count",f"{calc_layers} — high. Check growth rate."))
-    else:                  checks.append(("PASS","Layer count",f"{calc_layers} layers — covers δ={calc_delta:.2f}mm."))
-    if yplus_mode=="near_wall" and zone=="log_law":
-        checks.append(("WARN","Model compat.","Near-wall model but y+ in log-law range."))
+
+    if calc_layers < 15:
+        checks.append(("WARN","Layer count",f"{calc_layers} — low. May not cover full BL."))
+    elif calc_layers > 60:
+        checks.append(("WARN","Layer count",f"{calc_layers} — high. Check growth rate."))
+    else:
+        checks.append(("PASS","Layer count",f"{calc_layers} layers — covers δ={calc_delta:.2f}mm."))
+
+    if yplus_mode=="near_wall" and zone in ("log_law","outer_layer"):
+        checks.append(("WARN","Model compat.","Near-wall model selected but y+ is NOT in viscous sublayer."))
     elif yplus_mode=="wall_function" and zone=="viscous_sublayer":
-        checks.append(("WARN","Model compat.","Wall function but y+ in viscous sublayer — invalid."))
+        checks.append(("WARN","Model compat.","Wall function selected but y+ is in viscous sublayer — invalid."))
+    elif yplus_mode=="wall_function" and zone=="outer_layer":
+        checks.append(("FAIL","Model compat.","Wall function selected but y+ > 300 — outer layer, functions invalid."))
     else:
         checks.append(("PASS","Model compat.",f"{rec['primary']} consistent with y+={actual_yplus:.1f}."))
+
     if regime in ("transonic","high_transonic","supersonic"):
         checks.append(("WARN","Compressibility",
                        f"M={mach_val:.3f}, β={beta_val:.4f}. Density-based, ideal gas, energy ON."))
     else:
         checks.append(("PASS","Compressibility",f"M={mach_val:.4f} — incompressible valid."))
-    if calc_re < 5e4:   checks.append(("WARN","Reynolds",f"{calc_re:.2e} — consider laminar/transition model."))
-    elif calc_re > 1e7: checks.append(("WARN","Reynolds",f"{calc_re:.2e} — high Re, check mesh density."))
-    else:               checks.append(("PASS","Reynolds",f"{calc_re:.2e} — RANS applicable."))
+
+    if calc_re < 5e4:
+        checks.append(("WARN","Reynolds",f"{calc_re:.2e} — consider laminar/transition model."))
+    elif calc_re > 1e7:
+        checks.append(("WARN","Reynolds",f"{calc_re:.2e} — high Re, check mesh density."))
+    else:
+        checks.append(("PASS","Reynolds",f"{calc_re:.2e} — RANS applicable."))
 
     icon_map = {"PASS":"✅","WARN":"⚠️","FAIL":"❌"}
     for status, label, msg in checks:
@@ -642,7 +727,9 @@ if generate:
         f"; First cell height  : {calc_dy:.5f} mm  ({calc_dy/1000:.7f} m)\n"
         f"; Growth rate        : {growth_rate}\n"
         f"; Total layers       : {calc_layers}\n"
-        f"; Target y+          : {target_yplus}\n\n"
+        f"; Target y+          : {target_yplus}\n"
+        f"; BL thickness δ     : {calc_delta:.4f} mm\n"
+        f"; Friction velocity  : {u_tau:.4f} m/s\n\n"
         f"; ── Domain geometry (SpaceClaim / DesignModeler) ─────\n"
         f"{tui_domain_text}\n",
         language="text"
